@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import html
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -11,7 +14,10 @@ from assistant_core.orchestrator import AssistantOrchestrator
 
 
 settings = get_settings()
-conversation_store = ConversationStore(settings.memory_file)
+conversation_store = ConversationStore(
+    settings.memory_file,
+    timezone_name=settings.timezone,
+)
 
 
 def _default_messages() -> list[dict[str, str]]:
@@ -25,6 +31,12 @@ def _initialize_state() -> None:
         st.session_state.messages = _default_messages()
     if "last_run" not in st.session_state:
         st.session_state.last_run = None
+    if "history_edit_session_id" not in st.session_state:
+        st.session_state.history_edit_session_id = None
+    if "history_rename_value" not in st.session_state:
+        st.session_state.history_rename_value = ""
+    if "history_delete_session_id" not in st.session_state:
+        st.session_state.history_delete_session_id = None
 
 
 def _truncate(text: str, limit: int = 34) -> str:
@@ -52,7 +64,14 @@ def _current_title() -> str:
     return "New chat"
 
 
+def _clear_history_ui_state() -> None:
+    st.session_state.history_edit_session_id = None
+    st.session_state.history_rename_value = ""
+    st.session_state.history_delete_session_id = None
+
+
 def _reset_chat() -> None:
+    _clear_history_ui_state()
     st.session_state.session_id = str(uuid4())
     st.session_state.messages = _default_messages()
     st.session_state.last_run = None
@@ -62,9 +81,247 @@ def _load_chat(session_id: str) -> None:
     session = conversation_store.get_session(session_id)
     if not session:
         return
+    _clear_history_ui_state()
     st.session_state.session_id = str(session["session_id"])
     st.session_state.messages = session["messages"]
     st.session_state.last_run = None
+
+
+def _start_rename(session_id: str, current_title: str) -> None:
+    st.session_state.history_edit_session_id = session_id
+    st.session_state.history_rename_value = current_title
+    st.session_state.history_delete_session_id = None
+
+
+def _start_delete(session_id: str) -> None:
+    st.session_state.history_delete_session_id = session_id
+    st.session_state.history_edit_session_id = None
+    st.session_state.history_rename_value = ""
+
+
+def _updated_local_date(raw_timestamp: str) -> date | None:
+    if not raw_timestamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_timestamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo(settings.timezone)).date()
+
+
+def _group_label_for_date(raw_timestamp: str) -> str:
+    local_date = _updated_local_date(raw_timestamp)
+    if local_date is None:
+        return "Unknown date"
+
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    if local_date == today:
+        return "Today"
+    if local_date == today - timedelta(days=1):
+        return "Yesterday"
+    if local_date.year == today.year:
+        return local_date.strftime("%b %d")
+    return local_date.strftime("%b %d, %Y")
+
+
+def _group_sessions_by_date(
+    sessions: list[dict[str, str | int]],
+) -> dict[str, list[dict[str, str | int]]]:
+    grouped_sessions: dict[str, list[dict[str, str | int]]] = {}
+    for session in sessions:
+        label = _group_label_for_date(str(session.get("updated_at_raw", "")))
+        grouped_sessions.setdefault(label, []).append(session)
+    return grouped_sessions
+
+
+def _message_count_label(message_count: int) -> str:
+    if message_count == 1:
+        return "1 message"
+    return f"{message_count} messages"
+
+
+def _current_chat_summary(
+    current_session: dict[str, str | int] | None,
+) -> tuple[str, str]:
+    if current_session:
+        return (
+            str(current_session["title"]),
+            f"{_message_count_label(int(current_session['message_count']))} | Updated {current_session['updated_at']}",
+        )
+    if st.session_state.messages:
+        return (
+            _current_title(),
+            "In progress | This chat will save after the first successful reply.",
+        )
+    return ("New chat", "Fresh chat | Start a conversation to save it here.")
+
+
+def _render_rename_form(session_id: str) -> None:
+    with st.form(key=f"rename_form_{session_id}", clear_on_submit=False):
+        st.text_input("Chat name", key="history_rename_value")
+        save_col, cancel_col = st.columns(2)
+        with save_col:
+            save_clicked = st.form_submit_button(
+                "Save",
+                use_container_width=True,
+                type="primary",
+            )
+        with cancel_col:
+            cancel_clicked = st.form_submit_button(
+                "Cancel",
+                use_container_width=True,
+            )
+
+        if save_clicked:
+            if conversation_store.rename_session(
+                session_id,
+                st.session_state.history_rename_value,
+            ):
+                _clear_history_ui_state()
+                st.rerun()
+            st.warning("Add a non-empty title before saving.")
+
+        if cancel_clicked:
+            _clear_history_ui_state()
+            st.rerun()
+
+
+def _delete_session(session_id: str) -> None:
+    if not conversation_store.delete_session(session_id):
+        _clear_history_ui_state()
+        return
+    if session_id == st.session_state.session_id:
+        _reset_chat()
+        return
+    _clear_history_ui_state()
+
+
+def _render_session_overflow_menu(session: dict[str, str | int]) -> None:
+    session_id = str(session["session_id"])
+    with st.popover("⋮", use_container_width=True):
+        if st.button(
+            "Rename",
+            key=f"rename_{session_id}",
+            use_container_width=True,
+        ):
+            _start_rename(session_id, str(session["title"]))
+            st.rerun()
+        if st.button(
+            "Delete",
+            key=f"delete_{session_id}",
+            use_container_width=True,
+        ):
+            _start_delete(session_id)
+            st.rerun()
+
+
+def _render_session_actions(session: dict[str, str | int]) -> None:
+    session_id = str(session["session_id"])
+
+    if st.session_state.history_edit_session_id == session_id:
+        _render_rename_form(session_id)
+        return
+
+    if st.session_state.history_delete_session_id == session_id:
+        st.markdown(
+            '<div class="history-confirm">Delete this chat from memory?</div>',
+            unsafe_allow_html=True,
+        )
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button(
+                "Delete forever",
+                key=f"confirm_delete_{session_id}",
+                use_container_width=True,
+                type="primary",
+            ):
+                _delete_session(session_id)
+                st.rerun()
+        with cancel_col:
+            if st.button(
+                "Cancel",
+                key=f"cancel_delete_{session_id}",
+                use_container_width=True,
+            ):
+                _clear_history_ui_state()
+                st.rerun()
+        return
+
+
+def _render_history_item(session: dict[str, str | int]) -> None:
+    session_id = str(session["session_id"])
+    editing = st.session_state.history_edit_session_id == session_id
+    deleting = st.session_state.history_delete_session_id == session_id
+
+    if editing or deleting:
+        if st.button(
+            _truncate(str(session["title"]), 48),
+            key=f"open_{session_id}",
+            use_container_width=True,
+            type="secondary",
+        ):
+            _load_chat(session_id)
+            st.rerun()
+    else:
+        title_col, menu_col = st.columns([5.35, 1], gap="small")
+        with title_col:
+            if st.button(
+                _truncate(str(session["title"]), 40),
+                key=f"open_{session_id}",
+                use_container_width=True,
+                type="secondary",
+            ):
+                _load_chat(session_id)
+                st.rerun()
+        with menu_col:
+            _render_session_overflow_menu(session)
+
+    st.markdown(
+        f'<div class="history-meta">{html.escape(str(session["updated_at"]))} | {html.escape(_message_count_label(int(session["message_count"])))}</div>',
+        unsafe_allow_html=True,
+    )
+    _render_session_actions(session)
+
+
+def _render_current_chat_card(
+    current_session: dict[str, str | int] | None,
+) -> None:
+    current_title, current_meta = _current_chat_summary(current_session)
+    if current_session:
+        session_id = str(current_session["session_id"])
+        editing = st.session_state.history_edit_session_id == session_id
+        deleting = st.session_state.history_delete_session_id == session_id
+        card_html = f"""
+                <div class="history-current-card">
+                  <div class="history-current-badge">Current chat</div>
+                  <div class="history-current-title">{html.escape(_truncate(current_title, 54))}</div>
+                  <div class="history-current-meta">{html.escape(current_meta)}</div>
+                </div>
+                """
+        if editing or deleting:
+            st.markdown(card_html, unsafe_allow_html=True)
+        else:
+            card_col, menu_col = st.columns([5.35, 1], gap="small")
+            with card_col:
+                st.markdown(card_html, unsafe_allow_html=True)
+            with menu_col:
+                _render_session_overflow_menu(current_session)
+    else:
+        st.markdown(
+            f"""
+            <div class="history-current-card">
+              <div class="history-current-badge">Current chat</div>
+              <div class="history-current-title">{html.escape(_truncate(current_title, 54))}</div>
+              <div class="history-current-meta">{html.escape(current_meta)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if current_session:
+        _render_session_actions(current_session)
 
 
 @st.cache_resource
@@ -155,6 +412,48 @@ def _inject_css() -> None:
 
         .history-group {
           margin-top: 0.65rem;
+        }
+
+        .history-group-label {
+          color: var(--muted);
+          font-size: 0.76rem;
+          text-transform: uppercase;
+          letter-spacing: 0.11em;
+          margin: 1rem 0 0.5rem;
+        }
+
+        .history-current-card {
+          margin: 0.85rem 0 0.75rem;
+          padding: 0.9rem 0.95rem;
+          border-radius: 16px;
+          border: 1px solid #29466d;
+          background:
+            linear-gradient(180deg, rgba(18, 27, 42, 0.96), rgba(10, 16, 24, 0.96));
+          box-shadow:
+            inset 0 0 0 1px rgba(65, 215, 255, 0.08),
+            0 0 22px rgba(65, 215, 255, 0.08);
+        }
+
+        .history-current-badge {
+          color: var(--glow);
+          font-size: 0.72rem;
+          text-transform: uppercase;
+          letter-spacing: 0.14em;
+          margin-bottom: 0.45rem;
+        }
+
+        .history-current-title {
+          color: var(--text);
+          font-size: 0.98rem;
+          font-weight: 700;
+          line-height: 1.45;
+        }
+
+        .history-current-meta {
+          color: var(--muted);
+          font-size: 0.78rem;
+          margin-top: 0.45rem;
+          line-height: 1.55;
         }
 
         .chat-title {
@@ -276,7 +575,7 @@ def _inject_css() -> None:
 
         .stButton > button {
           width: 100%;
-          min-height: 40px;
+          min-height: 38px;
           border-radius: 12px;
           border: 1px solid var(--line);
           background: var(--panel);
@@ -289,6 +588,21 @@ def _inject_css() -> None:
           align-items: center;
           justify-content: flex-start;
           padding: 0.55rem 0.8rem;
+        }
+
+        .stTextInput > div > div > input {
+          background: #090d13;
+          border: 1px solid #1f2a3d;
+          border-radius: 12px;
+          color: var(--text);
+        }
+
+        .stTextInput label,
+        .stForm label {
+          color: var(--muted) !important;
+          font-size: 0.8rem !important;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
         }
 
         .stButton > button:hover {
@@ -336,6 +650,52 @@ def _inject_css() -> None:
           border-color: #3b79b5;
         }
 
+        .history-confirm {
+          color: #ffb4b4;
+          font-size: 0.82rem;
+          margin: 0.15rem 0 0.55rem 0.2rem;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stPopoverButton"] {
+          min-height: 38px;
+          padding: 0.35rem 0.25rem;
+          justify-content: center;
+          border-radius: 10px;
+          border-color: transparent;
+          background: transparent;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stPopoverButton"]:hover {
+          background: var(--panel-hover);
+          border-color: #1f2a3d;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stPopoverButton"] p {
+          font-size: 1.05rem;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          text-align: center !important;
+        }
+
+        /*
+         * Popover trigger = label row + StyledPopoverExpansionIcon (material expand_more).
+         * Hiding svg alone is unreliable; hide the icon column (last flex child of the row).
+         */
+        [data-testid="stSidebar"] [data-testid="stPopoverButton"] > * > *:last-child {
+          display: none !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stPopoverButton"] svg {
+          display: none !important;
+        }
+
+        [data-testid="stSidebar"]
+          [data-testid="stPopoverButton"]
+          [data-testid="stMarkdownContainer"]
+          ~ div {
+          display: none !important;
+        }
+
         @media (max-width: 900px) {
           .empty-shell {
             min-height: 56vh;
@@ -365,28 +725,36 @@ def _render_sidebar() -> None:
             st.rerun()
 
         saved_sessions = conversation_store.list_sessions()
-        if not saved_sessions:
+        current_session = next(
+            (
+                session
+                for session in saved_sessions
+                if session["session_id"] == st.session_state.session_id
+            ),
+            None,
+        )
+        _render_current_chat_card(current_session)
+
+        earlier_sessions = [
+            session
+            for session in saved_sessions
+            if session["session_id"] != st.session_state.session_id
+        ]
+        if not earlier_sessions:
             st.markdown(
-                '<div class="history-empty">No saved chats yet. Start one and it will appear here automatically.</div>',
+                '<div class="history-empty">No earlier chats yet. Once you finish a conversation, it will show up here. Use the ⋮ menu on a chat to rename or delete it.</div>',
                 unsafe_allow_html=True,
             )
-        else:
-            with st.container():
-                for session in saved_sessions:
-                    is_current = session["session_id"] == st.session_state.session_id
-                    label = _truncate(str(session["title"]))
-                    if st.button(
-                        label,
-                        key=f"session_{session['session_id']}",
-                        use_container_width=True,
-                        type="primary" if is_current else "secondary",
-                    ):
-                        _load_chat(str(session["session_id"]))
-                        st.rerun()
-                    st.markdown(
-                        f'<div class="history-meta">{session["updated_at"]}</div>',
-                        unsafe_allow_html=True,
-                    )
+            return
+
+        with st.container():
+            for group_label, sessions in _group_sessions_by_date(earlier_sessions).items():
+                st.markdown(
+                    f'<div class="history-group-label">{html.escape(group_label)}</div>',
+                    unsafe_allow_html=True,
+                )
+                for session in sessions:
+                    _render_history_item(session)
 
 
 def _render_empty_state() -> None:

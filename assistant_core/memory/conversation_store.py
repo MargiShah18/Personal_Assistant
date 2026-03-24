@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ConversationStore:
-    def __init__(self, file_path: Path, max_messages_per_session: int = 12) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        max_messages_per_session: int = 12,
+        timezone_name: str | None = None,
+    ) -> None:
         self.file_path = file_path
         self.max_messages_per_session = max_messages_per_session
+        self.display_timezone = self._resolve_timezone(timezone_name)
 
     def upsert_session(self, session_id: str, messages: list[dict[str, str]]) -> None:
         cleaned_messages = [
@@ -23,13 +30,47 @@ class ConversationStore:
             return
 
         payload = self._load()
+        existing_session = payload.get(session_id, {})
+        has_manual_title = (
+            existing_session.get("title_source") == "manual"
+            and bool(str(existing_session.get("title", "")).strip())
+        )
+        title = (
+            str(existing_session.get("title", "")).strip()
+            if has_manual_title
+            else self._build_title(cleaned_messages)
+        )
         payload[session_id] = {
             "session_id": session_id,
-            "title": self._build_title(cleaned_messages),
+            "title": title,
+            "title_source": "manual" if has_manual_title else "auto",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "messages": cleaned_messages[-self.max_messages_per_session :],
         }
         self._write(payload)
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        normalized_title = self._normalize_title(title)
+        if not normalized_title:
+            return False
+
+        payload = self._load()
+        session = payload.get(session_id)
+        if not session:
+            return False
+
+        session["title"] = normalized_title
+        session["title_source"] = "manual"
+        self._write(payload)
+        return True
+
+    def delete_session(self, session_id: str) -> bool:
+        payload = self._load()
+        if session_id not in payload:
+            return False
+        del payload[session_id]
+        self._write(payload)
+        return True
 
     def render_recent_sessions(self, current_session_id: str, limit: int) -> str:
         payload = self._load()
@@ -64,6 +105,7 @@ class ConversationStore:
             {
                 "session_id": session["session_id"],
                 "title": session.get("title", "Untitled session"),
+                "updated_at_raw": session.get("updated_at", ""),
                 "updated_at": self._format_timestamp(session.get("updated_at", "")),
                 "message_count": len(session.get("messages", [])),
             }
@@ -88,6 +130,7 @@ class ConversationStore:
         return {
             "session_id": session.get("session_id", session_id),
             "title": session.get("title", "Untitled session"),
+            "updated_at_raw": session.get("updated_at", ""),
             "updated_at": self._format_timestamp(session.get("updated_at", "")),
             "messages": messages,
         }
@@ -122,14 +165,42 @@ class ConversationStore:
             (message["content"] for message in messages if message["role"] == "user"),
             "New conversation",
         )
-        collapsed = " ".join(first_user_message.split())
+        collapsed = self._normalize_title(first_user_message) or "New conversation"
         return collapsed[:60] + ("..." if len(collapsed) > 60 else "")
 
     def _format_timestamp(self, raw_timestamp: str) -> str:
+        parsed = self._parse_timestamp(raw_timestamp)
+        if parsed is None:
+            if not raw_timestamp:
+                return "Unknown"
+            return raw_timestamp
+        localized = self._to_display_timezone(parsed)
+        return localized.strftime("%Y-%m-%d %H:%M")
+
+    def _normalize_title(self, title: str) -> str:
+        collapsed = " ".join(title.split())
+        return collapsed[:80]
+
+    def _parse_timestamp(self, raw_timestamp: str) -> datetime | None:
         if not raw_timestamp:
-            return "Unknown"
+            return None
         try:
             parsed = datetime.fromisoformat(raw_timestamp)
         except ValueError:
-            return raw_timestamp
-        return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _to_display_timezone(self, parsed: datetime) -> datetime:
+        if self.display_timezone is None:
+            return parsed.astimezone()
+        return parsed.astimezone(self.display_timezone)
+
+    def _resolve_timezone(self, timezone_name: str | None) -> ZoneInfo | None:
+        if not timezone_name:
+            return None
+        try:
+            return ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            return None

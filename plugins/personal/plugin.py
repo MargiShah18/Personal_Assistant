@@ -21,7 +21,10 @@ class PersonalAssistantPlugin(AssistantPlugin):
     knowledge_base: KnowledgeBase = field(init=False)
 
     def __post_init__(self) -> None:
-        self.memory_store = ConversationStore(self.settings.memory_file)
+        self.memory_store = ConversationStore(
+            self.settings.memory_file,
+            timezone_name=self.settings.timezone,
+        )
         self.knowledge_base = KnowledgeBase(self.settings)
 
     def build_tools(self, settings: Settings):
