@@ -11,6 +11,7 @@ class PluginContext:
     system_prompt: str
     memory_context: str
     knowledge_context: str
+    knowledge_sources: list[str]
     generated_at: str
 
 
@@ -28,7 +29,6 @@ class AssistantPlugin(ABC):
 
     @abstractmethod
     def persist_conversation(
-        self, session_id: str, messages: list[dict[str, str]]
+        self, session_id: str, messages: list[dict[str, object]]
     ) -> None:
         """Persist the session after a successful assistant response."""
-

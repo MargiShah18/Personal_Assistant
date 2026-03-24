@@ -324,6 +324,25 @@ def _render_current_chat_card(
         _render_session_actions(current_session)
 
 
+def _render_retrieved_sources(source_labels: list[str]) -> None:
+    if not source_labels:
+        return
+
+    badges = "".join(
+        f'<span class="sources-badge">{html.escape(source_label)}</span>'
+        for source_label in source_labels
+    )
+    st.markdown(
+        f"""
+        <div class="sources-shell">
+          <div class="sources-label">Retrieved from your docs</div>
+          <div class="sources-badges">{badges}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 @st.cache_resource
 def get_orchestrator() -> AssistantOrchestrator:
     return AssistantOrchestrator(settings)
@@ -656,6 +675,38 @@ def _inject_css() -> None:
           margin: 0.15rem 0 0.55rem 0.2rem;
         }
 
+        .sources-shell {
+          margin-top: 0.75rem;
+          padding-top: 0.75rem;
+          border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .sources-label {
+          color: var(--muted);
+          font-size: 0.75rem;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          margin-bottom: 0.55rem;
+        }
+
+        .sources-badges {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.45rem;
+        }
+
+        .sources-badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 0.32rem 0.62rem;
+          border-radius: 999px;
+          background: rgba(65, 215, 255, 0.08);
+          border: 1px solid rgba(65, 215, 255, 0.18);
+          color: var(--text);
+          font-size: 0.82rem;
+          line-height: 1.3;
+        }
+
         [data-testid="stSidebar"] [data-testid="stPopoverButton"] {
           min-height: 38px;
           padding: 0.35rem 0.25rem;
@@ -791,6 +842,14 @@ def _render_chat() -> None:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            if message["role"] == "assistant":
+                _render_retrieved_sources(
+                    [
+                        str(source)
+                        for source in message.get("sources", [])
+                        if str(source).strip()
+                    ]
+                )
 
 
 def main() -> None:
@@ -830,12 +889,20 @@ def main() -> None:
                 st.error(f"Assistant error: {exc}")
                 return
         st.markdown(result.content)
+        _render_retrieved_sources(result.context.knowledge_sources)
 
-    st.session_state.messages.append({"role": "assistant", "content": result.content})
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": result.content,
+            "sources": result.context.knowledge_sources,
+        }
+    )
     st.session_state.last_run = {
         "generated_at": result.context.generated_at,
         "memory_context": result.context.memory_context,
         "knowledge_context": result.context.knowledge_context,
+        "knowledge_sources": result.context.knowledge_sources,
     }
     st.rerun()
 

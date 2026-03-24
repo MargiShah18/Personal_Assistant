@@ -51,7 +51,7 @@ class AssistantOrchestrator:
         builder.add_edge("tools", "agent")
         return builder.compile()
 
-    def run(self, messages: list[dict[str, str]], session_id: str) -> AssistantRunResult:
+    def run(self, messages: list[dict[str, object]], session_id: str) -> AssistantRunResult:
         context = self.plugin.build_context(latest_user_text(messages), session_id)
         result = self.graph.invoke(
             {"messages": ui_messages_to_langchain(messages)},
@@ -65,6 +65,14 @@ class AssistantOrchestrator:
         final_message = result["messages"][-1]
         final_text = langchain_message_to_text(final_message)
         self.plugin.persist_conversation(
-            session_id, [*messages, {"role": "assistant", "content": final_text}]
+            session_id,
+            [
+                *messages,
+                {
+                    "role": "assistant",
+                    "content": final_text,
+                    "sources": context.knowledge_sources,
+                },
+            ],
         )
         return AssistantRunResult(content=final_text, context=context)

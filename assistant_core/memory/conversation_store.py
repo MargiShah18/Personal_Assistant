@@ -17,12 +17,9 @@ class ConversationStore:
         self.max_messages_per_session = max_messages_per_session
         self.display_timezone = self._resolve_timezone(timezone_name)
 
-    def upsert_session(self, session_id: str, messages: list[dict[str, str]]) -> None:
+    def upsert_session(self, session_id: str, messages: list[dict[str, object]]) -> None:
         cleaned_messages = [
-            {
-                "role": message["role"],
-                "content": message["content"].strip(),
-            }
+            self._clean_message(message)
             for message in messages
             if message.get("role") in {"user", "assistant"} and message.get("content", "").strip()
         ]
@@ -119,10 +116,7 @@ class ConversationStore:
             return None
 
         messages = [
-            {
-                "role": message["role"],
-                "content": message["content"],
-            }
+            self._clean_message(message)
             for message in session.get("messages", [])
             if message.get("role") in {"user", "assistant"} and message.get("content")
         ]
@@ -134,6 +128,16 @@ class ConversationStore:
             "updated_at": self._format_timestamp(session.get("updated_at", "")),
             "messages": messages,
         }
+
+    def _clean_message(self, message: dict[str, object]) -> dict[str, object]:
+        cleaned_message: dict[str, object] = {
+            "role": str(message["role"]),
+            "content": str(message["content"]).strip(),
+        }
+        cleaned_sources = self._clean_sources(message.get("sources"))
+        if cleaned_sources:
+            cleaned_message["sources"] = cleaned_sources
+        return cleaned_message
 
     def _load(self) -> dict[str, dict]:
         if not self.file_path.exists():
@@ -180,6 +184,16 @@ class ConversationStore:
     def _normalize_title(self, title: str) -> str:
         collapsed = " ".join(title.split())
         return collapsed[:80]
+
+    def _clean_sources(self, sources: object) -> list[str]:
+        if not isinstance(sources, list):
+            return []
+        cleaned_sources: list[str] = []
+        for source in sources:
+            normalized = " ".join(str(source).split())
+            if normalized and normalized not in cleaned_sources:
+                cleaned_sources.append(normalized[:120])
+        return cleaned_sources
 
     def _parse_timestamp(self, raw_timestamp: str) -> datetime | None:
         if not raw_timestamp:

@@ -38,7 +38,7 @@ class PersonalAssistantPlugin(AssistantPlugin):
             current_session_id=session_id,
             limit=self.settings.max_recent_sessions,
         )
-        knowledge_context = self.knowledge_base.render_context(
+        knowledge_context, knowledge_sources = self.knowledge_base.build_context(
             query=user_query,
             limit=self.settings.retrieval_k,
         )
@@ -63,11 +63,12 @@ class PersonalAssistantPlugin(AssistantPlugin):
             system_prompt=system_prompt,
             memory_context=memory_context,
             knowledge_context=knowledge_context,
+            knowledge_sources=knowledge_sources,
             generated_at=generated_at,
         )
 
     def persist_conversation(
-        self, session_id: str, messages: list[dict[str, str]]
+        self, session_id: str, messages: list[dict[str, object]]
     ) -> None:
         self.memory_store.upsert_session(session_id, messages)
 

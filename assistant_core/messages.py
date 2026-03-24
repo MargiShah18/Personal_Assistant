@@ -5,7 +5,7 @@ from typing import Iterable
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 
-def ui_messages_to_langchain(messages: Iterable[dict[str, str]]) -> list[BaseMessage]:
+def ui_messages_to_langchain(messages: Iterable[dict[str, object]]) -> list[BaseMessage]:
     converted: list[BaseMessage] = []
     for message in messages:
         role = message.get("role", "")
@@ -19,7 +19,7 @@ def ui_messages_to_langchain(messages: Iterable[dict[str, str]]) -> list[BaseMes
     return converted
 
 
-def latest_user_text(messages: Iterable[dict[str, str]]) -> str:
+def latest_user_text(messages: Iterable[dict[str, object]]) -> str:
     for message in reversed(list(messages)):
         if message.get("role") == "user":
             return message.get("content", "").strip()
@@ -40,4 +40,3 @@ def langchain_message_to_text(message: BaseMessage) -> str:
                 text_parts.append(item.get("text", ""))
         return "\n".join(part for part in text_parts if part)
     return str(content)
-

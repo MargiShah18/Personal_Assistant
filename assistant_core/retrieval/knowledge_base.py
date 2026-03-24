@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 from langchain_community.vectorstores import FAISS
@@ -19,18 +20,15 @@ class KnowledgeBase:
         self._vector_store: FAISS | None = None
         self._vector_signature: dict[str, int] | None = None
 
-    def render_context(self, query: str, limit: int) -> str:
+    def build_context(self, query: str, limit: int) -> tuple[str, list[str]]:
         results = self.search(query, limit)
         if not results:
-            return "No relevant personal documents found."
+            return ("No relevant personal documents found.", [])
+        return (self._render_documents(results), self._source_labels(results))
 
-        rendered = []
-        for index, document in enumerate(results, start=1):
-            source = document.metadata.get("source", "unknown")
-            rendered.append(
-                f"[{index}] {source}\n{document.page_content.strip()}"
-            )
-        return "\n\n".join(rendered)
+    def render_context(self, query: str, limit: int) -> str:
+        rendered_context, _ = self.build_context(query, limit)
+        return rendered_context
 
     def search(self, query: str, limit: int) -> list[Document]:
         if self.settings.has_model_credentials:
@@ -114,6 +112,30 @@ class KnowledgeBase:
 
         scored_chunks.sort(key=lambda item: item[0], reverse=True)
         return [chunk for _, chunk in scored_chunks[:limit]]
+
+    def _render_documents(self, documents: list[Document]) -> str:
+        rendered = []
+        for index, document in enumerate(documents, start=1):
+            source = document.metadata.get("source", "unknown")
+            rendered.append(f"[{index}] {source}\n{document.page_content.strip()}")
+        return "\n\n".join(rendered)
+
+    def _source_labels(self, documents: list[Document]) -> list[str]:
+        source_paths = []
+        for document in documents:
+            source = str(document.metadata.get("source", "")).strip()
+            if source and source not in source_paths:
+                source_paths.append(source)
+
+        if not source_paths:
+            return []
+
+        file_names = [Path(source).name for source in source_paths]
+        name_counts = Counter(file_names)
+        return [
+            Path(source).name if name_counts[Path(source).name] == 1 else source
+            for source in source_paths
+        ]
 
     def _document_files(self) -> list[Path]:
         return sorted(
